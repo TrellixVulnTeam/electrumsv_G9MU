@@ -250,6 +250,14 @@ async def create_peer_channel_locally_and_remotely_async(
     return peer_channel_row, writeonly_access_token, read_only_access_token
 
 
+# TODO(1.4.0) DPP Shared function for `send_outgoing_direct_payment_async` to establish connection
+#  to peer channel server
+#  - ?? What ought to be the lifetime of the peer channel
+#  - ?? What if there is a double spend or reorg?
+#  - 30 minute lifetime (after receipt of merkle proof) for mAPI use case peer channels to
+#  allow for these events to pass by
+
+
 async def process_incoming_peer_channel_messages_async(state: ServerConnectionState) -> None:
     """
     We raise server-related exceptions up and expect the connection management to deal with them.

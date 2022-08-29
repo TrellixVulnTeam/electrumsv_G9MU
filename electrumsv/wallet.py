@@ -3440,7 +3440,8 @@ class Wallet:
         # specific change.
         self.events.trigger_callback(WalletEvent.TRANSACTION_ADD, tx_hash, tx, link_state,
             import_flags)
-        app_state.async_.spawn(self._close_paid_payment_requests_async())
+        if import_flags & TransactionImportFlag.SKIP_CLOSE_PAYMENT_REQUEST == 0:
+            app_state.async_.spawn(self._close_paid_payment_requests_async())
 
     def import_transaction_with_error_callback(self, tx: Transaction, tx_state: TxFlags,
             error_callback: Callable[[str], None]) -> None:
@@ -4038,6 +4039,11 @@ class Wallet:
         assert peer_channel_server_state is not None
         await add_external_peer_channel_async(peer_channel_server_state,
             payment_ack.peer_channel_info)
+
+        # TODO(1.4.0) DPP. In a shared function called inline and on startup
+        #  1) Create a ServerConnectionState object with the read token and other required fields
+        #  2) spawn _manage_server_connection_async
+        # TODO --> Call a shared function here that does the above ^^
 
         await self.data.update_invoice_flags_async(
             [ (PaymentFlag.CLEARED_MASK_STATE, PaymentFlag.PAID, invoice_id) ])
@@ -4765,36 +4771,50 @@ class Wallet:
                     PaymentFlag.PAYMENT_REQUEST_REQUESTED:
                 dpp_response_message = dpp_make_payment_request_response(self, pr_row,
                     message_row)
-                asyncio.create_task(dpp_websocket_send(state, dpp_response_message))
+                app_state.async_.spawn(dpp_websocket_send(state, dpp_response_message))
 
             elif pr_row.state & PaymentFlag.PAYMENT_RECEIVED == \
                     PaymentFlag.PAYMENT_RECEIVED:
+                # TODO(1.4.0) DPP. This section should always return either:
+                #  - payment ack OR
+                #  - payment error + log these details to the db event log
+
                 # This parsing step also validates the received `Payment` message
                 try:
                     payment_obj = Payment.from_json(message_row.body.decode('utf-8'))
                 except Bip270Exception:
-                    # TODO(1.4.0) mAPI. Work out how best to propagate the failure reason
-                    #  back to the user in the GUI.
+                    # TODO(1.4.0) DPP. Add event log for failed payment attempts
                     self._logger.exception("Received direct-payment-protocol `Payment` was invalid")
                     continue
 
+                # TODO(1.4.0) DPP. Tx validation of outputs matching payment request etc.
+                #  --> dpp error returned over websocket if errors
+
                 # As the *Payee*, we broadcast the transaction
                 tx = Transaction.from_hex(payment_obj.transaction_hex)
-                if not self.have_transaction(tx.hash()):
-                    await self.import_transaction_async(tx.hash(), tx, TxFlags.STATE_RECEIVED,
-                        BlockHeight.LOCAL)
+
+                # TODO(1.4.0) DPP. Catch any expected raised exceptions. E.g. tx already exists?
+                #  --> dpp error returned over websocket if errors
+                await self.import_transaction_async(tx.hash(), tx, TxFlags.STATE_RECEIVED,
+                    BlockHeight.LOCAL,
+                    import_flags=TransactionImportFlag.SKIP_CLOSE_PAYMENT_REQUEST)
                 mapi_server_hint = \
                     self.get_mapi_broadcast_context(state.petty_cash_account_id, tx)
                 assert mapi_server_hint is not None
                 tx_context = TransactionContext(mapi_server_hint=mapi_server_hint)
                 try:
+                    # TODO(1.4.0) DPP.
+                    #  - If mAPI broadcast fails due to mAPI being down / offline - still
+                    #  send payment ack.
+                    #  - The UI will allow a re-broadcast at a later time
+                    #  - If there is a legitimate issue with the transaction -> send back dpp error
+                    #  message (This should be rare given prior validation steps)
                     broadcast_response, peer_channel_server_state = \
                         await self.broadcast_transaction_async(tx, tx_context)
                     successful = broadcast_response["returnResult"] == "success"
                 except (GeneralAPIError, ServerConnectionError, ServerError, ServerConnectionError,
                         BadServerError):
-                    # TODO(1.4.0) mAPI. Work out how best to propagate the failure reason
-                    #  back to the user in the GUI without crashing the task or event loop.
+                    # TODO(1.4.0) DPP. Add event log for failed payment attempts
                     self._logger.exception("Unexpected exception broadcasting to mAPI")
                     continue
 
@@ -4816,17 +4836,16 @@ class Wallet:
                     peer_channel_info = dpp_make_peer_channel_info(self, tx.hash(),
                         peer_channel_server_state)
                     dpp_ack_message = dpp_make_ack(tx, peer_channel_info, message_row)
-                    asyncio.create_task(dpp_websocket_send(state, dpp_ack_message))
+                    app_state.async_.spawn(dpp_websocket_send(state, dpp_ack_message))
                 else:
-                    # TODO(1.4.0) mAPI. Work out how best to propagate the failure reason
-                    #  back to the user in the GUI without crashing the task or event loop.
+                    # TODO(1.4.0) DPP. Add event log for failed payment attempts
                     self._logger.error("mAPI broadcast for txid: %s failed with reason: %s",
                         tx.txid(), broadcast_response['resultDescription'])
 
                     # Inform the *Payee* of the reason we rejected their `Payment`
                     error_reason = broadcast_response['resultDescription']
                     dpp_err_message = dpp_make_payment_error(message_row, error_reason)
-                    asyncio.create_task(dpp_websocket_send(state, dpp_err_message))
+                    app_state.async_.spawn(dpp_websocket_send(state, dpp_err_message))
 
             # ----- States for when we are the Payer ----- #
             # NOTE: Not included because when we are the ** Payer **, we use the simplified
@@ -5375,7 +5394,7 @@ class Wallet:
                 # We don't just want to wait for work for the caller, we also want to exit and do
                 # the appropriate thing if the chain management becomes pending. We use a task
                 # because that is what `asyncio.wait` returns.
-                chain_task = asyncio.create_task(self._chain_management_interrupt_event.wait(),
+                chain_task = app_state.async_.spawn(self._chain_management_interrupt_event.wait(),
                     name="chain management interrupt")
                 extended_awaitables: list[Awaitable[Any]] = \
                     [ entry() for entry in coroutine_callables ]
