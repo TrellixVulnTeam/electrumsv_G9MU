@@ -4034,6 +4034,9 @@ class Wallet:
         payment_ack = await send_outgoing_direct_payment_async(
             invoice_row.payment_uri, transaction.to_hex())
 
+        # TODO(1.4.0) DPP. When ack is received, the transaction should be updated to
+        #  TxFlags.STATE_DISPATCHED
+
         peer_channel_server_state = self.get_connection_state_for_usage(
             NetworkServerFlag.USE_MESSAGE_BOX)
         assert peer_channel_server_state is not None
@@ -4044,6 +4047,9 @@ class Wallet:
         #  1) Create a ServerConnectionState object with the read token and other required fields
         #  2) spawn _manage_server_connection_async
         # TODO --> Call a shared function here that does the above ^^
+        #  on startup it would re-spawn the channel connection if the merkle proof has not yet
+        #  been received + an additional 30 minutes of wait time (which may need a specialised
+        #  flag to mark a channel as having surpassed this wait time interval).
 
         await self.data.update_invoice_flags_async(
             [ (PaymentFlag.CLEARED_MASK_STATE, PaymentFlag.PAID, invoice_id) ])
@@ -4820,6 +4826,7 @@ class Wallet:
 
                 assert successful is not None
                 if successful:
+                    # TODO(1.4.0) DPP. Refactor this with an `update_payment_request_flags` function
                     # Update the payment request to `PaymentFlag.PAID` status
                     new_state_flag = PaymentFlag.PAID
                     new_state = pr_row.state & \
